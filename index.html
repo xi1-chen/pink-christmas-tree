@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="theme-color" content="#1a0710" />
+<title>Merry Christmas · 粉色圣诞树</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2314060e'/%3E%3Cpath d='M16 5l10 16H6z' fill='%23ff9dc4'/%3E%3Cpath d='M16 14l7 13H9z' fill='%23ffd7e6'/%3E%3C/svg%3E" />
+<style>
+  html,
+  body {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    overflow: hidden;
+    background: #0a0208;
+    color: #ffeef5;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* ===== 主画面：整屏画布 ===== */
+  #scene {
+    position: fixed;
+    inset: 0;
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+
+  /* ===== 文案层：左侧三分之一，与画面同为固定定位 ===== */
+  .card {
+    position: fixed;
+    left: 3.4vw;
+    top: 34%;
+    z-index: 2;
+    pointer-events: none;
+    max-width: 60vw;
+  }
+
+  .greet {
+    margin: 0;
+    font-family: "Monotype Corsiva", "Segoe Script", "Apple Chancery",
+      "Snell Roundhand", "Brush Script MT", cursive;
+    font-style: italic;
+    font-weight: 400;
+    font-size: clamp(30px, 3.4vw, 54px);
+    line-height: 1.12;
+    letter-spacing: 0.01em;
+    color: #ffeaf3;
+    text-shadow: 0 0 18px rgba(255, 152, 196, 0.55), 0 0 58px rgba(255, 88, 152, 0.4),
+      0 0 120px rgba(180, 30, 90, 0.25);
+  }
+
+  .sign {
+    margin: 0.55em 0 0 0.3em;
+    font-family: "Monotype Corsiva", "Segoe Script", "Apple Chancery",
+      "Snell Roundhand", "Brush Script MT", cursive;
+    font-style: italic;
+    font-size: clamp(17px, 1.35vw, 24px);
+    letter-spacing: 0.08em;
+    color: #f7b3d2;
+    opacity: 0.9;
+  }
+
+  /* ===== 窄屏 / 竖屏：文案移到画面上方居中，避开树的轮廓 ===== */
+  @media (max-width: 760px) {
+    .card {
+      left: 50%;
+      transform: translateX(-50%);
+      top: 8.5%;
+      max-width: 88vw;
+      text-align: center;
+    }
+
+    .greet {
+      font-size: clamp(27px, 8.4vw, 42px);
+    }
+
+    .sign {
+      margin: 0.4em 0 0;
+    }
+  }
+
+  @media (max-height: 560px) and (min-width: 761px) {
+    .card {
+      top: 24%;
+    }
+  }
+</style>
+</head>
+<body>
+
+<!-- 3D 粒子圣诞树（由 Pygame 版 tree.py 移植重写为 Canvas 2D） -->
+<canvas id="scene" role="img" aria-label="缓慢旋转的浅粉色粒子圣诞树"></canvas>
+
+<div class="card">
+  <p class="greet" id="greet">Merry Christmas</p>
+  <p class="sign" id="sign">chen</p>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var canvas = document.getElementById('scene');
+  if (!canvas || !canvas.getContext) { return; }
+  var ctx = canvas.getContext('2d', { alpha: false });
+
+  /* ================= 可改文案 ================= */
+  var GREETING = 'Merry Christmas';
+  var SIGNATURE = 'chen';          // 页面署名，换成你自己的文本即可
+
+  /* ================= 相机与造型参数 ================= */
+  var TAU = Math.PI * 2;
+  var TREE_HEIGHT = 12.0;
+  var CAM_DIST = 13.0;
+  var CAM_HEIGHT = 6.0;
+  var PITCH = -0.25;              // 负角度 = 俯视
+  var COS_P = Math.cos(PITCH);
+  var SIN_P = Math.sin(PITCH);
+  var SPIN_SPEED = 0.27;          // 弧度/秒（等同原版 60fps 每帧 0.0045）
+
+  /* 粒子基数，按视口面积折算；觉得太重就把 tree 调小 */
+  var BASE = { tree: 36000, ground: 2600, star: 800, heart: 800 };
+  var SNOW_COUNT = 10;
+  var LEVELS = 46;                // 颜色量化档位，用于批量上色（性能）
+
+  var W = 0, H = 0, DPR = 1, SCALE = 1, FOCAL = 0, CX = 0, CY = 0;
+  var xs, ys, zs, groups, groupColors;
+  var flakes = [];
+  var snowSprite = null;
+  var bgFill = null;
+  var angle = 0.55;
+  var lastT = 0;
+  var rafId = 0;
+  var reduceMotion = window.matchMedia &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  /* ================= 小工具 ================= */
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function randInt(a, b) { return Math.floor(a + Math.random() * (b - a + 1)); }
+  function clampRGB(v) {
+    v = Math.round(v);
+    return v < 0 ? 0 : (v > 255 ? 255 : v);
+  }
+  function gauss(mu, sd) {
+    var u = 0, v = 0;
+    while (u === 0) u = Math.random();
+    while (v === 0) v = Math.random();
+    return mu + sd * Math.sqrt(-2 * Math.log(u)) * Math.cos(TAU * v);
+  }
+
+  /* ================= 生成：树体（70% 螺旋灯带 + 30% 蓬松填充） ================= */
+  function genTree(pts, n) {
+    var spiralN = Math.floor(n * 0.7);
+    var i, u, h, y, baseR, wave, a, r, x, z, mid, cr, cg, cb;
+
+    for (i = 0; i < spiralN; i++) {
+      u = Math.random();
+      h = Math.pow(u, 1.6);                    // 底部密、顶部稀
+      y = TREE_HEIGHT * h + 0.2;
+      baseR = Math.pow(1 - h, 1.1) * 3.2;
+      wave = Math.max(0, Math.sin((h * 5.8 + 0.15) * TAU));   // 树枝分层起伏
+      baseR *= 1 + 0.65 * wave;
+      a = u * 9 * TAU + rand(-0.22, 0.22);
+      r = baseR * rand(0.85, 1.08);
+      x = Math.cos(a) * r;
+      z = Math.sin(a) * r;
+
+      mid = Math.max(0.15, 1 - Math.abs(h - 0.55) * 1.5);      // 中段更亮
+      cr = 250 + randInt(-6, 5);
+      cg = 184 + 28 * mid + randInt(-14, 16);
+      cb = 210 + randInt(-12, 20);
+
+      if (Math.random() < 0.08) {              // 暗粉小灯点缀
+        cr = randInt(248, 255);
+        cg = randInt(226, 246);
+        cb = randInt(236, 252);
+      }
+      pts.push(x, y, z, clampRGB(cr), clampRGB(cg), clampRGB(cb));
+    }
+
+    var fillN = n - spiralN;
+    for (i = 0; i < fillN; i++) {
+      h = Math.pow(Math.random(), 1.9);
+      y = TREE_HEIGHT * h + 0.2 + rand(-0.08, 0.08);
+      baseR = Math.pow(1 - h, 1.1) * 4.3;
+      wave = Math.max(0, Math.sin((h * 5.8 + 0.15) * TAU));
+      baseR *= 1 + 0.65 * wave;
+      r = baseR * Math.sqrt(Math.random());    // 偏外圈，营造蓬松边缘
+      a = Math.random() * TAU;
+      x = Math.cos(a) * r + rand(-0.08, 0.08);
+      z = Math.sin(a) * r + rand(-0.08, 0.08);
+      pts.push(x, y, z, randInt(238, 255), randInt(146, 194), randInt(184, 224));
+    }
+  }
+
+  /* ================= 生成：地面光环（法阵盘） ================= */
+  var RINGS = [4.6, 6.0, 7.4, 8.8, 10.2, 11.4];
+  function genGround(pts, n) {
+    for (var i = 0; i < n; i++) {
+      var ring = RINGS[randInt(0, RINGS.length - 1)];
+      var rr = gauss(ring, 0.3);
+      var th = Math.random() * TAU;
+      var c = Math.random() < 0.15 ? randInt(235, 255) : randInt(190, 235);
+      pts.push(
+        Math.cos(th) * rr, -0.25, Math.sin(th) * rr,
+        clampRGB(c * 0.96), clampRGB(c * 0.42), clampRGB(c * 0.6)
+      );
+    }
+  }
+
+  /* ================= 生成：空中悬浮小亮点（随场景一起转） ================= */
+  function genStars(pts, n) {
+    for (var i = 0; i < n; i++) {
+      var b = randInt(215, 255);
+      pts.push(
+        rand(-18, 18), rand(3, 18), rand(-18, 18),
+        clampRGB(b * 0.98), clampRGB(b * 0.76), clampRGB(b * 0.9)
+      );
+    }
+  }
+
+  /* ================= 生成：树顶 3D 爱心 ================= *
+   * 2D 心形隐式方程 (x²+y²-1)³ - x²y³ <= 0 采样，加少量 z 抖动
+   */
+  function genHeart(pts, n) {
+    var scale = 0.9;
+    var topY = TREE_HEIGHT + 0.05;
+    var made = 0, guard = 0, lim = n * 300;
+    while (made < n && guard++ < lim) {
+      var x = rand(-1.3, 1.3);
+      var y = rand(-1.4, 1.4);
+      var f = Math.pow(x * x + y * y - 1, 3) - x * x * (y * y * y);
+      if (f > 0) { continue; }
+      var dist = Math.sqrt(x * x + y * y);
+      var factor = Math.max(0.35, 1.15 - 0.5 * dist);
+      pts.push(
+        x * scale * 0.8,
+        topY + (y + 1) * scale * 0.5,
+        rand(-0.18, 0.18),
+        clampRGB(252),
+        clampRGB(128 + 96 * factor),
+        clampRGB(164 + 84 * factor)
+      );
+      made++;
+    }
+  }
+
+  /* ================= 建场景：扁平坐标 + 颜色分档（批量上色） ================= */
+  function buildScene() {
+    var area = window.innerWidth * window.innerHeight;
+    var q = Math.min(1, Math.max(0.45, area / 1440000));
+
+    var pts = [];
+    genTree(pts, Math.round(BASE.tree * q));
+    genGround(pts, Math.round(BASE.ground * q));
+    genStars(pts, Math.round(BASE.star * q));
+    genHeart(pts, Math.round(BASE.heart * q));
+
+    var N = pts.length / 6;
+    xs = new Float32Array(N);
+    ys = new Float32Array(N);
+    zs = new Float32Array(N);
+
+    var cnt = new Float32Array(LEVELS);
+    var sr = new Float32Array(LEVELS);
+    var sg = new Float32Array(LEVELS);
+    var sb = new Float32Array(LEVELS);
+    var bucket = new Uint8Array(N);
+
+    var i, p = 0, r, g, b, lum, k;
+    for (i = 0; i < N; i++) {
+      xs[i] = pts[p];
+      ys[i] = pts[p + 1];
+      zs[i] = pts[p + 2];
+      r = pts[p + 3];
+      g = pts[p + 4];
+      b = pts[p + 5];
+      p += 6;
+
+      lum = (r + g + b) / 765;
+      k = Math.floor(lum * LEVELS);
+      if (k > LEVELS - 1) { k = LEVELS - 1; }
+      if (k < 0) { k = 0; }
+      bucket[i] = k;
+      cnt[k] += 1;
+      sr[k] += r;
+      sg[k] += g;
+      sb[k] += b;
+    }
+
+    // 每档取平均色做代表色，并建立每档的索引表
+    var groupOf = new Uint8Array(LEVELS);
+    groups = [];
+    groupColors = [];
+    var gi = 0;
+    for (k = 0; k < LEVELS; k++) {
+      if (cnt[k] > 0) {
+        groupOf[k] = gi++;
+        groups.push(new Int32Array(cnt[k]));
+        groupColors.push(
+          'rgba(' + Math.round(sr[k] / cnt[k]) + ',' +
+          Math.round(sg[k] / cnt[k]) + ',' +
+          Math.round(sb[k] / cnt[k]) + ',0.74)'
+        );
+      } else {
+        groupOf[k] = 255;
+      }
+    }
+
+    var cursor = new Int32Array(groups.length);
+    for (i = 0; i < N; i++) {
+      gi = groupOf[bucket[i]];
+      if (gi === 255) { continue; }
+      groups[gi][cursor[gi]++] = i;
+    }
+  }
+
+  /* ================= 尺寸与背景 ================= */
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth;
+    H = window.innerHeight;
+
+    canvas.width = Math.max(1, Math.round(W * DPR));
+    canvas.height = Math.max(1, Math.round(H * DPR));
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    SCALE = H / 900;
+    FOCAL = Math.min(H * 0.62, W * 0.55);   // 横屏沿用原版构图，竖屏按宽度收
+    CX = W * 0.5;
+    CY = H * 0.5;
+
+    var g = ctx.createRadialGradient(
+      W * 0.5, H * 0.56, 0,
+      W * 0.5, H * 0.56, Math.max(W, H) * 0.82
+    );
+    g.addColorStop(0, '#3d1426');
+    g.addColorStop(0.34, '#2b0d1c');
+    g.addColorStop(0.7, '#170611');
+    g.addColorStop(1, '#050106');
+    bgFill = g;
+  }
+
+  /* ================= 前景大雪花（预渲染光斑贴图） ================= */
+  function makeSnowSprite() {
+    var S = 128;
+    var cv = document.createElement('canvas');
+    cv.width = S;
+    cv.height = S;
+    var c2 = cv.getContext('2d');
+    var grad = c2.createRadialGradient(S / 2, S / 2, 0, S / 2, S / 2, S / 2);
+    grad.addColorStop(0, 'rgba(255,255,255,1)');
+    grad.addColorStop(0.18, 'rgba(255,240,247,0.92)');
+    grad.addColorStop(0.38, 'rgba(255,178,210,0.34)');
+    grad.addColorStop(0.66, 'rgba(236,110,165,0.1)');
+    grad.addColorStop(1, 'rgba(200,60,120,0)');
+    c2.fillStyle = grad;
+    c2.beginPath();
+    c2.arc(S / 2, S / 2, S / 2, 0, TAU);
+    c2.fill();
+    snowSprite = cv;
+  }
+
+  function newFlake(fromTopFar) {
+    var s = H / 900;
+    var r = rand(10, 16) * s;
+    return {
+      x: rand(0, W),
+      y: fromTopFar ? rand(-140, -20) * s : rand(-90, -10) * s,
+      r: r,
+      v: rand(30, 45) * s
+    };
+  }
+
+  function initSnow() {
+    flakes = [];
+    for (var i = 0; i < SNOW_COUNT; i++) {
+      flakes.push(newFlake(true));
+    }
+  }
+
+  function updateSnow(dt) {
+    for (var i = 0; i < flakes.length; i++) {
+      var f = flakes[i];
+      f.y += f.v * dt;
+      if (f.y > H + f.r * 4) {
+        flakes[i] = newFlake(false);
+        flakes[i].y = -flakes[i].r * 5;
+      }
+    }
+  }
+
+  /* ================= 逐帧绘制 ================= */
+  function drawFrame() {
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = bgFill;
+    ctx.fillRect(0, 0, W, H);
+
+    var cosA = Math.cos(angle);
+    var sinA = Math.sin(angle);
+    var scl = SCALE;
+    var focal = FOCAL;
+    var cx = CX;
+    var cy = CY;
+
+    // 粒子统一用叠加混合，省掉每帧排序，密度高的地方自然叠出辉光
+    ctx.globalCompositeOperation = 'lighter';
+
+    for (var bi = 0; bi < groups.length; bi++) {
+      ctx.fillStyle = groupColors[bi];
+      var arr = groups[bi];
+      for (var j = 0; j < arr.length; j++) {
+        var i = arr[j];
+        var x = xs[i], y = ys[i], z = zs[i];
+
+        var xz = x * cosA - z * sinA;
+        var zz = x * sinA + z * cosA;
+        var zp = y * SIN_P + zz * COS_P + CAM_DIST;
+        if (zp <= 0.1) { continue; }
+
+        var yp = y * COS_P - zz * SIN_P - CAM_HEIGHT;
+        var f = focal / zp;
+        var sx = cx + xz * f;
+        var sy = cy - yp * f;
+        if (sx < -4 || sx > W + 4 || sy < -4 || sy > H + 4) { continue; }
+
+        var si = Math.floor(3.6 * scl - zp * 0.13 * scl);
+        if (si < 1) { si = 1; }
+        if (si > 4) { si = 4; }
+
+        ctx.fillRect(
+          (sx - si * 0.5) | 0,
+          (sy - si * 0.5) | 0,
+          si, si
+        );
+      }
+    }
+
+    // 前景雪花：覆盖在树之上，贴近镜头
+    ctx.globalCompositeOperation = 'source-over';
+    for (var si2 = 0; si2 < flakes.length; si2++) {
+      var fl = flakes[si2];
+      var d = fl.r * 3.4;
+      var a = 1;
+      if (fl.y < fl.r * 2) {
+        a = Math.max(0, (fl.y + fl.r * 2) / (fl.r * 4));
+      }
+      var bottom = H - fl.r * 2;
+      if (fl.y > bottom) {
+        a = Math.min(a, Math.max(0, 1 - (fl.y - bottom) / (fl.r * 4)));
+      }
+      if (a <= 0.01) { continue; }
+      ctx.globalAlpha = a;
+      ctx.drawImage(snowSprite, fl.x - d * 0.5, fl.y - d * 0.5, d, d);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  /* ================= 主循环 ================= */
+  function loop(now) {
+    if (!lastT) { lastT = now; }
+    var dt = (now - lastT) / 1000;
+    lastT = now;
+    if (dt > 0.05) { dt = 0.05; }
+
+    angle += SPIN_SPEED * dt;
+    updateSnow(dt);
+    drawFrame();
+
+    rafId = window.requestAnimationFrame(loop);
+  }
+
+  /* ================= 启动 ================= */
+  if (GREETING) { document.getElementById('greet').textContent = GREETING; }
+  document.getElementById('sign').textContent = SIGNATURE;
+
+  resize();
+  buildScene();
+  makeSnowSprite();
+  initSnow();
+
+  if (reduceMotion) {
+    // 尊重「减少动态效果」：给一帧稳定画面，不旋转
+    updateSnow(0.6);
+    drawFrame();
+  } else {
+    rafId = window.requestAnimationFrame(loop);
+  }
+
+  var resizeTimer = 0;
+  window.addEventListener('resize', function () {
+    window.clearTimeout(resizeTimer);
+    resizeTimer = window.setTimeout(function () {
+      resize();
+      initSnow();
+      if (reduceMotion) { drawFrame(); }
+    }, 140);
+  });
+
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) {
+      window.cancelAnimationFrame(rafId);
+    } else if (!reduceMotion) {
+      lastT = 0;
+      rafId = window.requestAnimationFrame(loop);
+    }
+  });
+})();
+</script>
+</body>
+</html>
